@@ -49,17 +49,19 @@ Requires Node 18+.
 
 ```bash
 npm install     # also downloads the 3.7 MB face model into models/ (optional; falls back to Google's CDN)
-npm start       # http://localhost:3000
+npm start       # http://localhost (port 80)
 ```
 
 Environment variables:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `PORT` | `3000` | HTTP port |
+| `PORT` | `80` | HTTP port |
 | `DATA_DIR` | `./data` | Where the JSON database and uploaded portraits live |
 | `CREATOR_USERNAME` | (unset) | Reserve The Creator title for this username |
 | `TRUST_PROXY` | (unset) | Set when running behind a reverse proxy / HTTPS terminator, so cookies get `Secure` |
+
+Port 80 is a privileged port on Linux, so either run `sudo npm start`, or allow Node to bind it once with `sudo setcap 'cap_net_bind_service=+ep' "$(command -v node)"`. macOS and Windows allow it without extra steps. To use another port: `PORT=3000 npm start`.
 
 The webcam only works on `https://` or `localhost`. That's a browser rule.
 

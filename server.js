@@ -10,7 +10,7 @@ import {
 import * as R from './lib/rules.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
-const PORT = Number(process.env.PORT || 3000);
+const PORT = Number(process.env.PORT || 80);
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(ROOT, 'data'));
 const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
 const CREATOR_USERNAME = (process.env.CREATOR_USERNAME || '').toLowerCase() || null;
@@ -468,9 +468,23 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'The Bureau encountered an irregularity.' });
 });
 
-app.listen(PORT, () => {
-  console.log(`Social Credit Bureau open at http://localhost:${PORT}`);
+const server = app.listen(PORT, () => {
+  console.log(`Social Credit Bureau open at http://localhost${PORT === 80 ? '' : `:${PORT}`}`);
   if (!fs.existsSync(path.join(ROOT, 'models', 'face_landmarker.task'))) {
     console.log('Face model not found locally; browsers will fetch it from Google. Run `npm run fetch-model` to self-host it.');
   }
+});
+
+server.on('error', (err) => {
+  if (err.code === 'EACCES') {
+    console.error(`Port ${PORT} needs elevated privileges on this system. Either:
+  sudo npm start
+  sudo setcap 'cap_net_bind_service=+ep' "$(command -v node)"   # Linux: let node bind to port 80 without sudo
+  PORT=3000 npm start                                             # or use an unprivileged port`);
+  } else if (err.code === 'EADDRINUSE') {
+    console.error(`Port ${PORT} is already in use (another web server?). Stop it, or run with PORT=3000 npm start`);
+  } else {
+    console.error(err);
+  }
+  process.exit(1);
 });
