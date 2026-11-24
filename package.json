@@ -1,32 +1,31 @@
 {
   "name": "social-credit",
   "version": "1.0.0",
+  "private": true,
   "description": "A satirical social credit bureau: rate your friends, scan their faces into 3D, watch the consequences.",
+  "type": "module",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js",
-    "fetch-model": "node scripts/fetch-model.cjs",
-    "postinstall": "node scripts/fetch-model.cjs",
-    "build:topology": "node scripts/build-topology.cjs"
+    "start": "bun server.js",
+    "dev": "bun --watch server.js",
+    "fetch-model": "bun scripts/fetch-model.js",
+    "postinstall": "bun scripts/fetch-model.js",
+    "build:topology": "bun scripts/build-topology.js"
   },
+  "dependencies": {
+    "@mediapipe/tasks-vision": "1.2.3",
+    "three": "0.187.0"
+  },
+  "engines": {
+    "bun": ">=1.2.3"
+  },
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/philippkaser/Social_credit.git"
   },
-  "license": "MIT",
   "bugs": {
     "url": "https://github.com/philippkaser/Social_credit/issues"
   },
-  "homepage": "https://github.com/philippkaser/Social_credit#readme",
-  "dependencies": {
-    "@mediapipe/tasks-vision": "1.2.3",
-    "express": "4.22.3",
-    "three": "0.187.0"
-  },
-  "private": true,
-  "type": "module",
-  "engines": {
-    "node": ">=18"
-  }
+  "homepage": "https://github.com/philippkaser/Social_credit#readme"
 }

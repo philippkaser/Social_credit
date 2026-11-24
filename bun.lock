@@ -1,0 +1,18 @@
+{
+  "lockfileVersion": 2,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "social-credit",
+      "dependencies": {
+        "@mediapipe/tasks-vision": "1.2.3",
+        "three": "0.187.0",
+      },
+    },
+  },
+  "packages": {
+    "@mediapipe/tasks-vision": ["@mediapipe/tasks-vision@1.2.3", "", {}, "sha512-sxJyfhbN+EamexhaaCmUlw7v8vWWMum7VDsORe6d4c8Dk/xlI4qiIgoSw9cE9hpvYhVRRVLIA8y605FbqWkNeQ=="],
+
+    "three": ["three@0.187.0", "", {}, "sha512-Qiu7R+Cmh8CstZsY1uJOSWnVlfo7ZtNLV7mF8Jltk3LB3AtDu9cRZlcnRKkAk8Y4z6KKw35z7Y7Urd7jWY8etA=="],
+  }
+}
