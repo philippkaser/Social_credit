@@ -127,7 +127,8 @@ function rankMap() {
 }
 
 function avatar(u) {
-  return u.photo ? `/uploads/${u.photo}.jpg` : null;
+  if (!u.photo) return null;
+  return u.hasAvatar ? `/uploads/${u.photo}.avatar.jpg` : `/uploads/${u.photo}.jpg`;
 }
 
 function brief(u) {
@@ -149,7 +150,9 @@ function publicUser(u, ctx = {}) {
     score: u.isCreator ? null : u.score,
     tier: R.publicTier(tier),
     photo: avatar(u),
+    portrait: u.photo ? `/uploads/${u.photo}.jpg` : null,
     mesh: u.photo && u.hasMesh ? `/uploads/${u.photo}.json` : null,
+    mask: u.photo && u.hasMask ? `/uploads/${u.photo}.mask.png` : null,
     biometricsRefused: !!u.biometricsRefused,
     joinedAt: u.joinedAt,
     delta24h: u.isCreator ? 0 : deltas.get(u.id) || 0,
@@ -355,15 +358,26 @@ function logout({ req, secure }) {
   return withSession({ ok: true }, null, secure);
 }
 
-// Biometric enrollment: a client-side-cropped JPEG plus (optionally) the 478
-// MediaPipe landmarks, normalised to that crop.
+function decodeDataUrl(value, kind, maxBytes) {
+  const mime = kind === 'png' ? 'image\\/png' : 'image\\/jpeg';
+  const m = new RegExp(`^data:${mime};base64,([A-Za-z0-9+/=]+)$`).exec(String(value || ''));
+  if (!m) return null;
+  const buf = Buffer.from(m[1], 'base64');
+  if (buf.length > maxBytes) throw new HttpError(413, 'Image too large.');
+  const magic = kind === 'png' ? [0x89, 0x50, 0x4e, 0x47] : [0xff, 0xd8, 0xff];
+  if (!magic.every((b, i) => buf[i] === b)) throw new HttpError(400, `That is not a ${kind.toUpperCase()}.`);
+  return buf;
+}
+
+// Portrait enrollment: a client-side-cropped head-and-shoulders JPEG, plus
+// optionally the 478 MediaPipe landmarks (normalised to that crop), a person
+// segmentation mask (PNG) and a tight avatar thumbnail (JPEG).
 async function uploadFace({ body, user: u }) {
   const { image, landmarks } = body;
-  const m = /^data:image\/jpeg;base64,([A-Za-z0-9+/=]+)$/.exec(String(image || ''));
-  if (!m) return fail(400, 'Expected a JPEG image.');
-  const buf = Buffer.from(m[1], 'base64');
-  if (buf.length > 1.5e6) return fail(413, 'Image too large.');
-  if (buf[0] !== 0xff || buf[1] !== 0xd8 || buf[2] !== 0xff) return fail(400, 'That is not a JPEG.');
+  const buf = decodeDataUrl(image, 'jpeg', 1.5e6);
+  if (!buf) return fail(400, 'Expected a JPEG image.');
+  const avatarBuf = body.avatar ? decodeDataUrl(body.avatar, 'jpeg', 4e5) : null;
+  const maskBuf = body.mask ? decodeDataUrl(body.mask, 'png', 6e5) : null;
 
   let mesh = null;
   if (landmarks != null) {
@@ -378,10 +392,14 @@ async function uploadFace({ body, user: u }) {
   const name = `${u.id}-${crypto.randomBytes(8).toString('hex')}`;
   await Bun.write(path.join(UPLOAD_DIR, `${name}.jpg`), buf);
   if (mesh) await Bun.write(path.join(UPLOAD_DIR, `${name}.json`), JSON.stringify({ v: 1, n: mesh.length / 3, landmarks: mesh }));
+  if (avatarBuf) await Bun.write(path.join(UPLOAD_DIR, `${name}.avatar.jpg`), avatarBuf);
+  if (maskBuf) await Bun.write(path.join(UPLOAD_DIR, `${name}.mask.png`), maskBuf);
   u.photo = name;
   u.hasMesh = !!mesh;
+  u.hasAvatar = !!avatarBuf;
+  u.hasMask = !!maskBuf;
   if (old) {
-    for (const ext of ['jpg', 'json']) fs.rm(path.join(UPLOAD_DIR, `${old}.${ext}`), { force: true }, () => {});
+    for (const ext of ['jpg', 'json', 'avatar.jpg', 'mask.png']) fs.rm(path.join(UPLOAD_DIR, `${old}.${ext}`), { force: true }, () => {});
   }
   store.addEntry({ kind: 'scanned', userId: u.id, delta: 0, scoreAfter: u.isCreator ? null : u.score, note: mesh ? 'mesh' : 'flat' });
   store.save();

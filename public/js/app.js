@@ -1,9 +1,8 @@
 import { api } from './api.js';
 import {
-  $, $$, esc, fmt, signed, pad, scoreText, timeAgo, avatar, badge, deltaChip, countUp, floatDelta, toast, sparkline,
+  $, $$, esc, fmt, signed, pad, scoreText, timeAgo, avatar, badge, deltaChip, countUp, floatDelta, toast, sparkline, initials,
 } from './ui.js';
-import { FaceViewer } from './face3d.js';
-import { LINES } from './face-topology.js';
+import { SplatViewer } from './splat-viewer.js';
 import * as scan from './scan.js';
 
 const state = { me: null, rules: null, decree: null, hasCreator: false, creatorReserved: false };
@@ -140,6 +139,9 @@ function who(b) {
   return `<a class="who" href="#/c/${esc(b.username)}" style="--c:${esc(b.tier.color)}">${esc(b.name)}</a>`;
 }
 
+const SEAL = '<svg class="seal" viewBox="0 0 16 16" role="img" aria-label="Exemplary Citizen"><path d="M8 1.2l1.8 4.2 4.5.4-3.4 3 1 4.4L8 10.9l-3.9 2.3 1-4.4-3.4-3 4.5-.4z"/></svg>';
+const seal = (c) => (c.tier.id === 'AAA' ? SEAL : '');
+
 const KIND_ICON = { reflected: '↩', loyalty: '✦', fee: '¤', promoted: '▲', demoted: '▼', enrolled: '◎', scanned: '⌖', refused: '⊘', reeducated: '✎', 'failed-reeducation': '✗', amnesty: '❖', decree: '§' };
 
 function feedLine(e) {
@@ -154,8 +156,8 @@ function feedLine(e) {
     case 'promoted': return `${u} was promoted to <b>${esc(tierById(e.note).name)}</b>`;
     case 'demoted': return `${u} was demoted to <b>${esc(tierById(e.note).name)}</b>`;
     case 'enrolled': return e.user?.isCreator ? `${u} has arrived. All is well.` : `${u} enrolled as a citizen`;
-    case 'scanned': return `${u} submitted biometrics`;
-    case 'refused': return `${u} refused biometrics`;
+    case 'scanned': return `${u} submitted a portrait`;
+    case 'refused': return `${u} declined to submit a portrait`;
     case 'reeducated': return `${u} completed re-education`;
     case 'failed-reeducation': return `${u} failed re-education. It has been noted.`;
     case 'amnesty': return `${a} granted ${u} amnesty`;
@@ -170,27 +172,19 @@ function feedItem(e) {
   return `<li class="fi" data-id="${e.id}"><span class="fi-icon" aria-hidden="true">${esc(icon)}</span><p>${feedLine(e)}</p><span class="fi-meta">${d}<time datetime="${new Date(e.at).toISOString()}">${timeAgo(e.at)}</time></span></li>`;
 }
 
-function hud({ no, right, left, hint = 'Drag to rotate' }) {
-  return `<div class="hud" aria-hidden="true">
-    <span class="hud-tl">Biometric record<b>Nº ${esc(no)}</b></span>
-    <span class="hud-tr">${right}</span>
-    <span class="hud-bl">${esc(left)}</span>
-    <span class="hud-br">${esc(hint)}</span>
-    <i class="corner c1"></i><i class="corner c2"></i><i class="corner c3"></i><i class="corner c4"></i>
-  </div>`;
-}
-
-function meshLabel(c) {
-  if (c.mesh) return '478 landmarks · 904 facets';
-  if (c.photo) return 'Flat portrait · approximated';
-  return c.biometricsRefused ? 'Biometrics refused' : 'No biometrics on file';
-}
-
-function mountViewer(el, nav, subject) {
-  const v = new FaceViewer(el);
-  onCleanup(nav, () => v.dispose());
-  v.show(subject);
-  return v;
+// The citizen's Gaussian-splat portrait, or a quiet placeholder without one.
+function mountPortrait(el, nav, c) {
+  if (!c?.portrait) {
+    el.classList.add('is-empty');
+    el.insertAdjacentHTML('afterbegin', `<div class="viewer-empty" aria-hidden="true"><span>${esc(initials(c?.name || '?'))}</span><p>${c?.biometricsRefused ? 'Portrait withheld' : 'No portrait on file'}</p></div>`);
+    return null;
+  }
+  const viewer = new SplatViewer(el);
+  onCleanup(nav, () => viewer.dispose());
+  el.insertAdjacentHTML('beforeend', '<span class="viewer-hint">Drag to orbit</span>');
+  el.setAttribute('aria-label', `3D portrait of ${c.name}`);
+  const ready = viewer.show({ portrait: c.portrait, mesh: c.mesh, mask: c.mask, tier: c.tier.id }).catch((e) => { console.warn(e); return 0; });
+  return { viewer, ready };
 }
 
 // ------------------------------------------------------------------ home
@@ -241,7 +235,7 @@ async function viewHome({ root, nav }) {
       <li><a class="row${c.isCreator ? ' row-creator' : ''}${me && me.id === c.id ? ' row-me' : ''}" href="#/c/${esc(c.username)}">
         <span class="rank">${c.isCreator ? '♛' : pad(c.rank, 2)}</span>
         ${avatar(c, 44)}
-        <span class="row-who"><b>${esc(c.name)}</b><small>@${esc(c.username)} · ${esc(c.tier.name)}</small></span>
+        <span class="row-who"><b>${esc(c.name)}${seal(c)}</b><small>@${esc(c.username)} · ${esc(c.tier.name)}</small></span>
         <span class="row-score"><b>${scoreText(c)}</b>${c.isCreator ? '<span class="delta zero">fixed</span>' : deltaChip(c.delta24h)}</span>
         ${badge(c.tier)}
       </a></li>`).join('');
@@ -259,15 +253,13 @@ async function viewHome({ root, nav }) {
   renderFeed(feed);
 
   const heroEl = $('#hero-viewer', root);
-  const subject = citizens.find((c) => c.isCreator) || citizens[0];
+  const subject = citizens.find((c) => c.isCreator && c.portrait) || citizens.find((c) => c.portrait) || citizens.find((c) => c.isCreator);
   if (subject) {
-    heroEl.innerHTML = `${hud({ no: pad(subject.citizenNo), right: `Standing<b>${scoreText(subject)}</b>`, left: meshLabel(subject) })}
-      <figcaption><a href="#/c/${esc(subject.username)}">${esc(subject.name)}</a><span>${subject.isCreator ? 'The Creator · beyond rating' : esc(subject.tier.name)}</span></figcaption>`;
-    mountViewer(heroEl, nav, { photo: subject.photo, mesh: subject.mesh, tier: subject.tier.id, name: subject.name });
+    heroEl.innerHTML = `<figcaption><a href="#/c/${esc(subject.username)}">${esc(subject.name)}</a><span>${subject.isCreator ? 'The Creator · Standing ∞' : `${esc(subject.tier.name)} · ${scoreText(subject)}`}</span></figcaption>`;
+    mountPortrait(heroEl, nav, subject);
   } else {
-    heroEl.innerHTML = `${hud({ no: '0001', right: 'Standing<b>∞</b>', left: 'Position vacant' })}
-      <figcaption><a href="#/enroll">Vacancy: The Creator</a><span>${state.creatorReserved ? 'Reserved' : 'Enroll first to claim it'}</span></figcaption>`;
-    mountViewer(heroEl, nav, { photo: null, mesh: null, tier: 'CREATOR', name: '?' });
+    heroEl.innerHTML = `<figcaption><a href="#/enroll">Position vacant</a><span>${state.creatorReserved ? 'The Creator’s seat is reserved' : 'Enroll first to become The Creator'}</span></figcaption>`;
+    mountPortrait(heroEl, nav, null);
   }
 
   const timer = setInterval(async () => {
@@ -292,10 +284,13 @@ async function viewProfile({ root, nav }, username) {
 
   root.innerHTML = `
     <section class="profile">
-      <figure class="viewer profile-viewer" id="pv">${hud({ no: pad(c.citizenNo), right: `Classification<b>${esc(c.tier.id === 'CREATOR' ? 'AAA+' : c.tier.id)}</b>`, left: meshLabel(c) })}</figure>
+      <div class="profile-media">
+        <figure class="viewer profile-viewer" id="pv"></figure>
+        <div class="viewer-meta" id="pv-meta"></div>
+      </div>
       <div class="dossier">
         <p class="eyebrow">Citizen Nº ${pad(c.citizenNo)} · Enrolled ${timeAgo(c.joinedAt)}</p>
-        <h1 class="display name">${esc(c.name)}</h1>
+        <h1 class="display name">${esc(c.name)}${seal(c)}</h1>
         <p class="handle">@${esc(c.username)}</p>
         <div class="score-block">
           <span class="score" id="score" data-value="0" style="--c:${esc(c.tier.color)}">${scoreText(c)}</span>
@@ -312,7 +307,18 @@ async function viewProfile({ root, nav }, username) {
       <ol class="feed record" id="record"></ol>
     </section>`;
 
-  const viewer = mountViewer($('#pv', root), nav, { photo: c.photo, mesh: c.mesh, tier: c.tier.id, name: c.name });
+  const portrait = mountPortrait($('#pv', root), nav, c);
+  portrait?.ready.then((count) => {
+    if (nav !== navId || !count) return;
+    $('#pv-meta', root).innerHTML = `<span>Gaussian splat · ${fmt(count)} splats</span><button class="link" id="dl-splat" type="button">Download .splat</button>`;
+    $('#dl-splat', root).addEventListener('click', () => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(portrait.viewer.splatFile());
+      a.download = `${c.username}.splat`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    });
+  });
 
   const renderHead = () => {
     const t = tier();
@@ -380,11 +386,11 @@ async function viewProfile({ root, nav }, username) {
       const r = await api.post(`/citizens/${encodeURIComponent(c.username)}/amnesty`);
       toast(`${c.name} has been granted amnesty. Their record is clean, their gratitude eternal.`, 'pos');
       c = r.citizen;
-      await refresh(true);
+      await refresh();
     });
   };
 
-  const refresh = async (reshow = false) => {
+  const refresh = async () => {
     const prevTier = c.tier.id;
     const prevScore = c.score;
     data = await api.get(`/citizens/${encodeURIComponent(c.username)}`);
@@ -392,7 +398,7 @@ async function viewProfile({ root, nav }, username) {
     c = data.citizen;
     renderHead();
     if (!c.isCreator && prevScore !== c.score) countUp(scoreEl, c.score, { from: prevScore, duration: 800 });
-    if (reshow || prevTier !== c.tier.id) viewer.show({ photo: c.photo, mesh: c.mesh, tier: c.tier.id, name: c.name });
+    if (prevTier !== c.tier.id) portrait?.viewer.setTier(c.tier.id);
     renderPanel();
   };
 
@@ -403,17 +409,14 @@ async function viewProfile({ root, nav }, username) {
       setMe(r.me);
       const main = r.entries[0];
       if (r.outcome === 'reflected') {
-        viewer.pulse(false);
         floatDelta(btn, main.delta);
         toast(r.message, 'neg', 7000);
         document.body.classList.add('shake');
         setTimeout(() => document.body.classList.remove('shake'), 600);
       } else if (r.outcome === 'loyal') {
-        viewer.pulse(true);
         floatDelta(btn, r.entries[1]?.delta || 0);
         toast(r.message, 'pos');
       } else {
-        viewer.pulse(main.delta >= 0);
         floatDelta(scoreEl, main.delta);
         toast(r.message, main.delta >= 0 ? 'pos' : 'neg', r.entries.length > 1 ? 7000 : 4200);
       }
@@ -458,7 +461,7 @@ function renderOwnPanel(panel, nav) {
           <p class="muted small">Shown to every citizen at the top of every page. Leave empty to repeal.</p>
         </form>` : ''}
       <div class="actions">
-        <a class="btn btn-sm" href="#/scan">${me.photo ? 'Update biometrics' : 'Submit biometrics'}</a>
+        <a class="btn btn-sm" href="#/scan">${me.photo ? 'Update portrait' : 'Submit portrait'}</a>
         ${re.eligible ? `<a class="btn btn-sm ${reReady ? 'btn-gold' : 'btn-ghost'}" href="#/reeducation">${reReady ? `Re-education (+${k.REEDUCATION_REWARD})` : `Re-education in ${Math.ceil((re.nextAt - Date.now()) / 36e5)}h`}</a>` : ''}
         <button class="btn btn-ghost btn-sm" id="logout">Sign out</button>
       </div>
@@ -496,7 +499,7 @@ async function viewEnroll({ root, nav }) {
         <label>Display name<input name="name" maxlength="40" required placeholder="Ada Lovelace" autocomplete="name"></label>
         <label>Username<input name="username" required pattern="[a-z0-9_]{3,20}" placeholder="ada" autocomplete="username" autocapitalize="none" spellcheck="false"><small>3–20 lowercase letters, digits or underscores.</small></label>
         <label>Password<input name="password" type="password" minlength="6" required autocomplete="new-password"></label>
-        <button class="btn btn-lg">Continue to biometrics</button>
+        <button class="btn btn-lg">Continue to portrait</button>
         <p class="muted small">Already a citizen? <a href="#/login">Sign in</a>.</p>
       </form>
     </section>`;
@@ -541,60 +544,63 @@ async function viewLogin({ root }) {
   });
 }
 
-// ------------------------------------------------------------------ biometrics
+// ------------------------------------------------------------------ portrait capture
 async function viewScan({ root, nav }) {
   if (!state.me) { location.hash = '#/enroll'; return; }
   const me = state.me;
   root.innerHTML = `
     <section class="scan-page">
       <header>
-        <p class="eyebrow">${me.photo ? 'Biometric update' : 'Step 2 of 2 · Biometrics'}</p>
+        <p class="eyebrow">${me.photo ? 'Portrait update' : 'Step 2 of 2 · Portrait'}</p>
         <h1 class="display">Present your <em>face</em>.</h1>
-        <p class="lede">A front-facing portrait becomes a 478-point 3D mesh. Detection runs on your device; only the cropped portrait and the mesh are sent to the Bureau.</p>
+        <p class="lede">A front-facing photo becomes a 3D Gaussian splat of your head and shoulders. Everything is computed on your device; only the finished portrait is sent to the Bureau.</p>
       </header>
       <div class="bio">
         <div class="bio-stage" id="stage">
           <div class="drop" id="drop">
-            <svg viewBox="0 0 120 140" class="drop-face" aria-hidden="true"><ellipse cx="60" cy="68" rx="40" ry="52"/><path d="M42 60h8M70 60h8M60 64v14l-5 4M48 96q12 8 24 0"/></svg>
+            <svg viewBox="0 0 120 140" class="drop-face" aria-hidden="true"><ellipse cx="60" cy="62" rx="34" ry="44"/><path d="M14 138c4-26 22-36 46-36s42 10 46 36"/></svg>
             <p><b>Drop a portrait here</b></p>
             <div class="actions">
               <label class="btn">Choose a photo<input type="file" accept="image/*" id="file" hidden></label>
               <button class="btn btn-ghost" id="cam-btn" type="button">Use camera</button>
             </div>
-            <p class="muted small">Face forward, even light, no sunglasses. The Bureau prefers a neutral expression; it does not insist.</p>
+            <p class="muted small">Head and shoulders, facing forward, even light. The Bureau prefers a neutral expression; it does not insist.</p>
           </div>
           <div class="cam" id="cam" hidden>
             <video playsinline muted></video>
             <div class="cam-guide" aria-hidden="true"></div>
             <div class="actions"><button class="btn" id="snap" type="button">Capture</button><button class="btn btn-ghost" id="cam-cancel" type="button">Cancel</button></div>
           </div>
-          <div class="scan-photo" id="scan-photo" hidden><img alt="Your portrait"><canvas width="512" height="512"></canvas><div class="scanline"></div></div>
+          <div class="scan-photo" id="scan-photo" hidden><img alt="Your photo"><div class="scan-progress"><i></i></div></div>
           <figure class="viewer scan-viewer" id="scan-viewer" hidden></figure>
         </div>
         <aside class="bio-side">
-          <p class="label">Bureau console</p>
-          <ol class="log" id="log"><li>Awaiting subject.</li></ol>
+          <p class="label">Processing</p>
+          <ol class="steps" id="steps">
+            <li data-step="face"><b>Face landmarks</b><span>Waiting</span></li>
+            <li data-step="segment"><b>Segmentation</b><span>Waiting</span></li>
+            <li data-step="depth"><b>Depth estimate</b><span>Waiting</span></li>
+            <li data-step="splat"><b>Gaussian splats</b><span>Waiting</span></li>
+          </ol>
           <div class="actions" id="confirm" hidden>
-            <button class="btn" id="submit" type="button">Submit biometrics</button>
-            <button class="btn btn-ghost" id="retry" type="button">Try another</button>
+            <button class="btn" id="submit" type="button">Submit portrait</button>
+            <button class="btn btn-ghost" id="retry" type="button">Try another photo</button>
           </div>
-          ${me.photo || me.biometricsRefused ? '' : `<button class="link refuse" id="refuse" type="button">Refuse biometrics (${state.rules.constants.NO_BIOMETRICS_PENALTY} credits)</button>`}
+          ${me.photo || me.biometricsRefused ? '' : `<button class="link refuse" id="refuse" type="button">Continue without a portrait (${state.rules.constants.NO_BIOMETRICS_PENALTY} credits)</button>`}
         </aside>
       </div>
     </section>`;
 
-  // Warm the model while the user picks a photo.
-  scan.loadLandmarker().catch(() => {});
+  // Warm the models while the user picks a photo.
+  scan.warmUp();
 
-  const log = $('#log', root);
-  const say = (text, cls = '') => {
-    const li = document.createElement('li');
-    if (cls) li.className = cls;
-    li.textContent = text;
-    log.appendChild(li);
-    log.scrollTop = log.scrollHeight;
-    return li;
+  const steps = $('#steps', root);
+  const step = (name, status, text) => {
+    const li = $(`[data-step="${name}"]`, steps);
+    li.className = status;
+    li.querySelector('span').textContent = text;
   };
+  const resetSteps = () => $$('li', steps).forEach((li) => { li.className = ''; li.querySelector('span').textContent = 'Waiting'; });
   const els = {
     drop: $('#drop', root), cam: $('#cam', root), photo: $('#scan-photo', root), viewer: $('#scan-viewer', root), confirm: $('#confirm', root),
   };
@@ -607,57 +613,55 @@ async function viewScan({ root, nav }) {
     result = null;
     els.drop.hidden = false; els.cam.hidden = true; els.photo.hidden = true; els.viewer.hidden = true; els.confirm.hidden = true;
     viewer?.dispose(); viewer = null;
-    log.innerHTML = '<li>Awaiting subject.</li>';
+    resetSteps();
   };
 
   const process = async (canvas) => {
     els.drop.hidden = true; els.cam.hidden = true; els.viewer.hidden = true; els.confirm.hidden = true;
-    log.innerHTML = '';
-    const preview = scan.centreCrop(canvas).canvas;
+    resetSteps();
     const img = $('img', els.photo);
-    img.src = preview.toDataURL('image/jpeg', 0.8);
-    const overlay = $('canvas', els.photo);
-    overlay.getContext('2d').clearRect(0, 0, 512, 512);
+    img.src = scan.centreCrop(canvas).toDataURL('image/jpeg', 0.8);
     els.photo.hidden = false;
-    els.photo.classList.add('scanning');
-    say('Subject received.');
-    const l1 = say('Loading face model…', 'busy');
+    els.photo.classList.add('working');
+
+    step('face', 'busy', 'Detecting');
     let points = null;
     try {
-      await scan.loadLandmarker();
-      l1.className = 'ok';
-      l1.textContent = 'Face model ready (MediaPipe, on-device).';
-      const l2 = say('Locating face…', 'busy');
-      points = await scan.detect(canvas);
-      l2.className = points ? 'ok' : 'warn';
-      l2.textContent = points ? 'Face located.' : 'No face found. The Bureau will approximate.';
+      points = await scan.detectFace(canvas);
+      step('face', points ? 'ok' : 'warn', points ? '478 points' : 'No face found');
     } catch (e) {
       console.warn(e);
-      l1.className = 'warn';
-      l1.textContent = 'Face model unavailable. The Bureau will approximate.';
+      step('face', 'warn', 'Unavailable');
     }
     if (nav !== navId) return;
 
-    result = points ? scan.cropToFace(canvas, points) : scan.centreCrop(canvas);
-    img.src = result.canvas.toDataURL('image/jpeg', 0.85);
-    if (result.landmarks) {
-      say(`${result.landmarks.length / 3} landmarks acquired.`, 'ok');
-      await scan.animateLandmarks(overlay, result.landmarks, LINES, { color: '#9cc3ff' });
-      say('Reconstructing depth…', 'ok');
-    } else {
-      say('Sculpting relief from flat portrait…', 'ok');
+    const portrait = points ? scan.cropPortrait(canvas, points) : { canvas: scan.centreCrop(canvas), landmarks: null };
+    const avatarCanvas = points ? scan.cropAvatar(canvas, points) : scan.centreCrop(canvas, 256);
+    img.src = portrait.canvas.toDataURL('image/jpeg', 0.85);
+
+    step('segment', 'busy', 'Separating');
+    let mask = null;
+    try {
+      mask = await scan.segment(portrait.canvas);
+      step('segment', mask ? 'ok' : 'warn', mask ? 'Person isolated' : 'Approximated');
+    } catch (e) {
+      console.warn(e);
+      step('segment', 'warn', 'Approximated');
     }
-    els.photo.classList.remove('scanning');
-    await new Promise((r) => setTimeout(r, 350));
     if (nav !== navId) return;
 
-    els.photo.hidden = true;
+    step('depth', 'ok', portrait.landmarks ? 'Face mesh + head model' : 'Head model');
+    step('splat', 'busy', 'Generating');
     els.viewer.hidden = false;
-    els.viewer.innerHTML = hud({ no: pad(me.citizenNo), right: `Subject<b>${esc(me.name)}</b>`, left: result.landmarks ? '478 landmarks · 904 facets' : 'Flat portrait · approximated' });
+    els.viewer.innerHTML = '<span class="viewer-hint">Drag to orbit</span>';
     viewer?.dispose();
-    viewer = new FaceViewer(els.viewer);
-    await viewer.show({ photo: result.canvas.toDataURL('image/jpeg', 0.9), mesh: result.landmarks ? { landmarks: result.landmarks } : null, tier: me.tier.id, name: me.name });
-    say(result.landmarks ? 'Biometric record ready. Drag to inspect.' : 'Approximation ready. Drag to inspect.', 'ok');
+    viewer = new SplatViewer(els.viewer);
+    const count = await viewer.show({ portrait: portrait.canvas, mesh: portrait.landmarks ? { landmarks: portrait.landmarks } : null, mask, tier: me.tier.id });
+    if (nav !== navId) return;
+    els.photo.hidden = true;
+    els.photo.classList.remove('working');
+    step('splat', 'ok', `${fmt(count)} splats`);
+    result = { portrait, avatar: avatarCanvas, mask };
     els.confirm.hidden = false;
   };
 
@@ -675,7 +679,6 @@ async function viewScan({ root, nav }) {
     try {
       els.drop.hidden = true; els.cam.hidden = false;
       camera = await scan.openCamera($('video', els.cam));
-      say('Camera live. Look straight ahead.');
     } catch (e) {
       toast('The camera is unavailable. A photo will do.', 'warn');
       reset();
@@ -693,9 +696,14 @@ async function viewScan({ root, nav }) {
     if (!result) return;
     e.target.disabled = true;
     try {
-      const r = await api.post('/me/face', { image: scan.toJpeg(result.canvas), landmarks: result.landmarks });
+      const r = await api.post('/me/face', {
+        image: scan.toJpeg(result.portrait.canvas),
+        landmarks: result.portrait.landmarks,
+        avatar: scan.toJpeg(result.avatar, 0.88),
+        mask: result.mask ? scan.toPng(result.mask) : null,
+      });
       setMe(r.me);
-      toast('Biometrics accepted. Welcome to the registry.', 'pos');
+      toast('Portrait accepted. Welcome to the registry.', 'pos');
       location.hash = `#/c/${r.me.username}`;
     } catch (err) {
       toast(err.message, 'warn');
@@ -741,7 +749,7 @@ function viewHandbook({ root }) {
         <article><h3>§3 Envy tax</h3><p>Reporting an Exemplary Citizen costs the reporter ${signed(k.ENVY_TAX)}. Success is not a crime.</p></article>
         <article><h3>§4 Fraternization</h3><p>Praising a Persona Non Grata costs the praiser ${signed(k.FRATERNIZATION_FEE)}. Choose your friends carefully.</p></article>
         <article><h3>§5 Cooling off</h3><p>You may rate the same citizen once every ${k.SAME_TARGET_COOLDOWN_MIN} minutes. Self-assessment is not permitted.</p></article>
-        <article><h3>§6 Biometrics</h3><p>Citizens present a front-facing portrait, which becomes a 3D record. Refusing costs ${signed(k.NO_BIOMETRICS_PENALTY)}. Only you can upload your face; nobody can enroll someone else.</p></article>
+        <article><h3>§6 Portraits</h3><p>Citizens present a front-facing photo, which becomes a 3D Gaussian-splat portrait. Declining costs ${signed(k.NO_BIOMETRICS_PENALTY)}. Only you can upload your face; nobody can enroll someone else.</p></article>
         <article><h3>§7 Re-education</h3><p>Citizens below ${fmt(k.START_SCORE)} may take a short loyalty quiz every ${k.REEDUCATION_COOLDOWN_H} hours. Pass all three questions to earn +${k.REEDUCATION_REWARD}.</p></article>
         <article><h3>§8 Limits</h3><p>Scores run from ${fmt(k.MIN_SCORE)} to ${fmt(k.MAX_SCORE)}. Nobody but The Creator escapes gravity.</p></article>
       </div>

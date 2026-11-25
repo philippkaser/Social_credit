@@ -1,39 +1,69 @@
-// Biometric enrollment: find the face with MediaPipe's Face Landmarker (runs
-// entirely in the browser via WebAssembly), crop a square portrait around it
-// and normalise the 478 landmarks to that crop.
-const REMOTE_MODEL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
-const CROP = 512;
+// Portrait capture, entirely on-device via MediaPipe (WebAssembly):
+//  1. Face Landmarker finds 478 3D landmarks.
+//  2. Selfie Segmenter separates the person from the background.
+// We then crop a head-and-shoulders portrait, express the landmarks in crop
+// space, and produce a tight avatar thumbnail. Only those results are uploaded.
+import { GRID } from './splats.js';
 
-let landmarkerPromise = null;
+const REMOTE = 'https://storage.googleapis.com/mediapipe-models';
+const MODELS = {
+  face: ['/models/face_landmarker.task', `${REMOTE}/face_landmarker/face_landmarker/float16/1/face_landmarker.task`],
+  segment: ['/models/selfie_segmenter.tflite', `${REMOTE}/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite`],
+};
+const PORTRAIT = 768;
+const AVATAR = 256;
 
-export function loadLandmarker() {
-  if (!landmarkerPromise) {
-    landmarkerPromise = (async () => {
-      const { FaceLandmarker, FilesetResolver } = await import('@mediapipe/tasks-vision');
-      const fileset = await FilesetResolver.forVisionTasks('/vendor/mediapipe/wasm');
-      let modelAssetPath = '/models/face_landmarker.task';
-      try {
-        const r = await fetch(modelAssetPath, { method: 'HEAD' });
-        if (!r.ok) throw new Error('no local model');
-      } catch { modelAssetPath = REMOTE_MODEL; }
+let visionPromise = null;
+const cache = {};
+
+function vision() {
+  if (!visionPromise) {
+    visionPromise = (async () => {
+      const mod = await import('@mediapipe/tasks-vision');
+      const fileset = await mod.FilesetResolver.forVisionTasks('/vendor/mediapipe/wasm');
+      return { mod, fileset };
+    })();
+    visionPromise.catch(() => { visionPromise = null; });
+  }
+  return visionPromise;
+}
+
+async function modelPath([local, remote]) {
+  try {
+    const r = await fetch(local, { method: 'HEAD' });
+    if (r.ok) return local;
+  } catch { /* fall through */ }
+  return remote;
+}
+
+function load(kind, create) {
+  if (!cache[kind]) {
+    cache[kind] = (async () => {
+      const { mod, fileset } = await vision();
+      const modelAssetPath = await modelPath(MODELS[kind]);
       let lastErr;
       for (const delegate of ['GPU', 'CPU']) {
-        try {
-          return await FaceLandmarker.createFromOptions(fileset, {
-            baseOptions: { modelAssetPath, delegate },
-            runningMode: 'IMAGE',
-            numFaces: 1,
-          });
-        } catch (e) { lastErr = e; }
+        try { return await create(mod, fileset, { modelAssetPath, delegate }); } catch (e) { lastErr = e; }
       }
       throw lastErr;
     })();
-    landmarkerPromise.catch(() => { landmarkerPromise = null; });
+    cache[kind].catch(() => { delete cache[kind]; });
   }
-  return landmarkerPromise;
+  return cache[kind];
 }
 
-export function fileToCanvas(file, max = 1600) {
+export const loadLandmarker = () => load('face', (mod, fs, baseOptions) =>
+  mod.FaceLandmarker.createFromOptions(fs, { baseOptions, runningMode: 'IMAGE', numFaces: 1 }));
+
+export const loadSegmenter = () => load('segment', (mod, fs, baseOptions) =>
+  mod.ImageSegmenter.createFromOptions(fs, { baseOptions, runningMode: 'IMAGE', outputConfidenceMasks: true, outputCategoryMask: false }));
+
+export function warmUp() {
+  loadLandmarker().catch(() => {});
+  loadSegmenter().catch(() => {});
+}
+
+export function fileToCanvas(file, max = 1800) {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file);
     const img = new Image();
@@ -51,57 +81,92 @@ export function fileToCanvas(file, max = 1600) {
   });
 }
 
-export async function detect(canvas) {
+export async function detectFace(canvas) {
   const lm = await loadLandmarker();
-  const res = lm.detect(canvas);
-  return res.faceLandmarks?.[0] || null;
+  return lm.detect(canvas).faceLandmarks?.[0] || null;
 }
 
-// Square crop around the face (with room for hair and chin); landmarks are
-// re-expressed in crop space. z scales with x, per MediaPipe's convention.
-export function cropToFace(src, points) {
+// Person mask as a GRID×GRID greyscale canvas (white = person).
+export async function segment(canvas) {
+  const seg = await loadSegmenter();
+  const res = seg.segment(canvas);
+  try {
+    const m = res.confidenceMasks?.[0];
+    if (!m) return null;
+    const f = m.getAsFloat32Array();
+    const src = document.createElement('canvas');
+    src.width = m.width; src.height = m.height;
+    const sx = src.getContext('2d');
+    const img = sx.createImageData(m.width, m.height);
+    for (let i = 0; i < f.length; i++) {
+      const v = Math.round(Math.min(1, Math.max(0, f[i])) * 255);
+      img.data[i * 4] = img.data[i * 4 + 1] = img.data[i * 4 + 2] = v;
+      img.data[i * 4 + 3] = 255;
+    }
+    sx.putImageData(img, 0, 0);
+    const out = document.createElement('canvas');
+    out.width = out.height = GRID;
+    const ox = out.getContext('2d');
+    ox.imageSmoothingQuality = 'high';
+    ox.drawImage(src, 0, 0, GRID, GRID);
+    return out;
+  } finally {
+    res.close?.();
+  }
+}
+
+function faceBox(src, points) {
   const W = src.width, H = src.height;
   let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
   for (const p of points) {
     x0 = Math.min(x0, p.x * W); x1 = Math.max(x1, p.x * W);
     y0 = Math.min(y0, p.y * H); y1 = Math.max(y1, p.y * H);
   }
-  const side = Math.max(x1 - x0, y1 - y0) * 1.55;
-  const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2 - (y1 - y0) * 0.06;
+  return { x0, x1, y0, y1, w: x1 - x0, h: y1 - y0 };
+}
+
+// Head-and-shoulders crop, landmarks re-expressed in crop space (z scales with x).
+export function cropPortrait(src, points) {
+  const b = faceBox(src, points);
+  const side = Math.max(b.w, b.h) * 2.5;
+  const cx = (b.x0 + b.x1) / 2, cy = (b.y0 + b.y1) / 2 + b.h * 0.3;
   const sx = cx - side / 2, sy = cy - side / 2;
-  const out = paint(src, sx, sy, side);
+  const canvas = paint(src, sx, sy, side, PORTRAIT);
   const landmarks = [];
   for (const p of points) {
-    landmarks.push(
-      round((p.x * W - sx) / side),
-      round((p.y * H - sy) / side),
-      round((p.z * W) / side),
-    );
+    landmarks.push(round((p.x * src.width - sx) / side), round((p.y * src.height - sy) / side), round((p.z * src.width) / side));
   }
-  return { canvas: out, landmarks };
+  return { canvas, landmarks };
 }
 
-export function centreCrop(src) {
+export function cropAvatar(src, points) {
+  const b = faceBox(src, points);
+  const side = Math.max(b.w, b.h) * 1.45;
+  return paint(src, (b.x0 + b.x1) / 2 - side / 2, (b.y0 + b.y1) / 2 - side / 2 - b.h * 0.04, side, AVATAR);
+}
+
+export function centreCrop(src, size = PORTRAIT) {
   const side = Math.min(src.width, src.height);
-  return { canvas: paint(src, (src.width - side) / 2, Math.max(0, (src.height - side) * 0.3), side), landmarks: null };
+  return paint(src, (src.width - side) / 2, Math.max(0, (src.height - side) * 0.3), side, size);
 }
 
-function paint(src, sx, sy, side) {
+function paint(src, sx, sy, side, size) {
   const c = document.createElement('canvas');
-  c.width = c.height = CROP;
+  c.width = c.height = size;
   const x = c.getContext('2d');
   x.fillStyle = '#111';
-  x.fillRect(0, 0, CROP, CROP);
+  x.fillRect(0, 0, size, size);
   x.imageSmoothingQuality = 'high';
-  x.drawImage(src, sx, sy, side, side, 0, 0, CROP, CROP);
+  x.drawImage(src, sx, sy, side, side, 0, 0, size, size);
   return c;
 }
 
 const round = (v) => Math.round(v * 1e4) / 1e4;
 
-export const toJpeg = (canvas) => canvas.toDataURL('image/jpeg', 0.88);
+export const toJpeg = (canvas, q = 0.9) => canvas.toDataURL('image/jpeg', q);
+export const toPng = (canvas) => canvas.toDataURL('image/png');
 
-// Webcam capture. Resolves with a canvas, or rejects if the camera is unavailable.
+// Webcam capture. Resolves with a controller, or rejects if no camera is available.
 export async function openCamera(video) {
   const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 960 } }, audio: false });
   video.srcObject = stream;
@@ -119,44 +184,4 @@ export async function openCamera(video) {
     },
     stop() { stream.getTracks().forEach((t) => t.stop()); video.srcObject = null; },
   };
-}
-
-// Draws the "scan" overlay: landmarks appearing top to bottom, then the mesh.
-export function animateLandmarks(overlay, landmarks, lines, { color = '#86b8ff', duration = 1400 } = {}) {
-  const ctx = overlay.getContext('2d');
-  const S = overlay.width;
-  const n = Math.min(468, landmarks.length / 3);
-  const order = [...Array(n).keys()].sort((a, b) => landmarks[a * 3 + 1] - landmarks[b * 3 + 1]);
-  const start = performance.now();
-  return new Promise((resolve) => {
-    const step = (now) => {
-      const p = Math.min(1, (now - start) / duration);
-      ctx.clearRect(0, 0, S, S);
-      const shown = Math.floor(order.length * Math.min(1, p * 1.4));
-      const vis = new Uint8Array(n);
-      for (let i = 0; i < shown; i++) vis[order[i]] = 1;
-      const lp = Math.max(0, (p - 0.35) / 0.65);
-      if (lp > 0) {
-        ctx.strokeStyle = color;
-        ctx.globalAlpha = 0.35 * lp;
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        for (let i = 0; i < lines.length; i += 2) {
-          const a = lines[i], b = lines[i + 1];
-          if (a >= n || b >= n || !vis[a] || !vis[b]) continue;
-          ctx.moveTo(landmarks[a * 3] * S, landmarks[a * 3 + 1] * S);
-          ctx.lineTo(landmarks[b * 3] * S, landmarks[b * 3 + 1] * S);
-        }
-        ctx.stroke();
-      }
-      ctx.globalAlpha = 1;
-      ctx.fillStyle = color;
-      for (let i = 0; i < shown; i++) {
-        const k = order[i];
-        ctx.fillRect(landmarks[k * 3] * S - 1.2, landmarks[k * 3 + 1] * S - 1.2, 2.4, 2.4);
-      }
-      if (p < 1) requestAnimationFrame(step); else resolve();
-    };
-    requestAnimationFrame(step);
-  });
 }

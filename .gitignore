@@ -3,3 +3,4 @@ data/
 models/*.task
 *.part
 .DS_Store
+models/*.tflite
